@@ -18,7 +18,6 @@ import java.time.LocalDateTime;
         indexes = {
                 @Index(name = "idx_txn_transaction_id", columnList = "transaction_id"),
                 @Index(name = "idx_txn_user_id", columnList = "user_id"),
-                @Index(name = "idx_txn_wallet_id", columnList = "wallet_id"),
                 @Index(name = "idx_txn_type_status", columnList = "type, status"),
                 @Index(name = "idx_txn_created_at", columnList = "created_at"),
                 @Index(name = "idx_txn_razorpay_order_id", columnList = "razorpay_order_id"),
@@ -33,15 +32,34 @@ public class Transaction {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @NotNull(message = "Wallet ID is required")
+    @Column(name = "wallet_id", nullable = false)
+    @Builder.Default
+    private Long walletId = 0L; // Default to 0 or -1
+
+    @Column(name = "merchant_id")
+    private Long merchantId;
+
+    @Size(max = 100, message = "Customer name must not exceed 100 characters")
+    @Column(name = "customer_name", length = 100)
+    private String customerName;
+
+    @Size(max = 50, message = "Invoice number must not exceed 50 characters")
+    @Column(name = "invoice_number", length = 50)
+    private String invoiceNumber;
+
+    @Size(max = 50, message = "Transaction channel must not exceed 50 characters")
+    @Column(name = "transaction_channel", length = 50)
+    private String transactionChannel;
+
+    @Size(max = 50, message = "Device type must not exceed 50 characters")
+    @Column(name = "device_type", length = 50)
+    private String deviceType;
+
     @NotBlank(message = "Transaction ID is required")
     @Size(min = 10, max = 50, message = "Transaction ID must be between 10-50 characters")
     @Column(name = "transaction_id", nullable = false, unique = true, length = 50)
     private String transactionId;
-
-    @NotNull(message = "Wallet ID is required")
-    @Positive(message = "Wallet ID must be positive")
-    @Column(name = "wallet_id", nullable = false)
-    private Long walletId;
 
     @NotNull(message = "User ID is required")
     @Positive(message = "User ID must be positive")
@@ -83,16 +101,6 @@ public class Transaction {
     @Size(min = 3, max = 500, message = "Description must be between 3-500 characters")
     @Column(nullable = false, length = 500)
     private String description;
-
-    @NotNull(message = "Opening balance is required")
-    @Digits(integer = 12, fraction = 2, message = "Opening balance must have max 12 integer and 2 fraction digits")
-    @Column(name = "opening_balance", nullable = false, precision = 12, scale = 2)
-    private BigDecimal openingBalance;
-
-    @NotNull(message = "Closing balance is required")
-    @Digits(integer = 12, fraction = 2, message = "Closing balance must have max 12 integer and 2 fraction digits")
-    @Column(name = "closing_balance", nullable = false, precision = 12, scale = 2)
-    private BigDecimal closingBalance;
 
     @NotNull(message = "Currency is required")
     @Pattern(regexp = "^[A-Z]{3}$", message = "Currency must be 3 uppercase letters")
@@ -199,6 +207,20 @@ public class Transaction {
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    @NotNull(message = "Opening balance is required")
+    @DecimalMin(value = "0.00", inclusive = true, message = "Opening balance cannot be negative")
+    @Digits(integer = 12, fraction = 2, message = "Opening balance must have max 12 integer and 2 fraction digits")
+    @Column(name = "opening_balance", nullable = false, precision = 12, scale = 2)
+    @Builder.Default
+    private BigDecimal openingBalance = BigDecimal.ZERO;
+
+    @NotNull(message = "Closing balance is required")
+    @DecimalMin(value = "0.00", inclusive = true, message = "Closing balance cannot be negative")
+    @Digits(integer = 12, fraction = 2, message = "Closing balance must have max 12 integer and 2 fraction digits")
+    @Column(name = "closing_balance", nullable = false, precision = 12, scale = 2)
+    @Builder.Default
+    private BigDecimal closingBalance = BigDecimal.ZERO;
+
     @NotNull(message = "Updated timestamp is required")
     @PastOrPresent(message = "Updated timestamp cannot be in the future")
     @Column(name = "updated_at", nullable = false)
@@ -304,9 +326,8 @@ public class Transaction {
     }
 
     // Business Methods
-    public void markCompleted(BigDecimal closingBalance) {
+    public void markCompleted() {  // Remove BigDecimal parameter
         this.status = TransactionStatus.COMPLETED;
-        this.closingBalance = closingBalance;
         this.completedAt = LocalDateTime.now();
         this.isProcessed = true;
         this.processedAt = LocalDateTime.now();
@@ -372,4 +393,19 @@ public class Transaction {
         return this.status == TransactionStatus.COMPLETED ||
                 this.status == TransactionStatus.SETTLED;
     }
+
+    public void setReconciled(boolean reconciled) {
+        this.isReconciled = reconciled;
+        if (reconciled) {
+            this.reconciledAt = LocalDateTime.now();
+        }
+    }
+
+    public void setProcessed(boolean processed) {
+        this.isProcessed = processed;
+        if (processed) {
+            this.processedAt = LocalDateTime.now();
+        }
+    }
+
 }
