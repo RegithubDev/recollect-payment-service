@@ -26,10 +26,10 @@ public class PaymentLinkService {
 
     private final RazorpayClient razorpayClient;
 
-    @Value("${razorpay.callback.success:http://localhost:8080/api/payments/success}")
+    @Value("${razorpay.callback.success}")
     private String defaultCallbackUrl;
 
-    @Value("${razorpay.callback.webhook:http://localhost:8080/api/payments/webhook}")
+    @Value("${razorpay.callback.webhook}")
     private String defaultWebhookUrl;
 
     /**
@@ -329,19 +329,18 @@ public class PaymentLinkService {
             <body>
                 <div class="payment-card">
                     <h1 style="color: #333; margin-bottom: 10px;">Complete Your Payment</h1>
-                    
                     <div class="amount-display">
                         <span class="currency">₹</span>%s
                     </div>
-                    
+                   \s
                     <p class="description">
                         Click the button below to securely complete your payment
                     </p>
-                    
+                   \s
                     <a href="%s" class="pay-button" target="_blank">
                         Pay Now
                     </a>
-                    
+                   \s
                     <div class="info-box">
                         <div class="info-item">
                             <span>Amount:</span>
@@ -356,18 +355,18 @@ public class PaymentLinkService {
                             <span style="color: #3498db;">Ready to Pay</span>
                         </div>
                     </div>
-                    
+                   \s
                     <div class="expiry-warning">
                         ⚡ This link expires in 30 minutes
                     </div>
-                    
+                   \s
                     <div class="secure-badge">
                         🔒 Secured by Razorpay
                     </div>
-                    
+                   \s
                     <img src="https://razorpay.com/assets/razorpay-logo.svg" alt="Razorpay" class="razorpay-logo">
                 </div>
-                
+               \s
                 <script>
                     // Auto-refresh if page is opened
                     setTimeout(function() {
@@ -378,7 +377,7 @@ public class PaymentLinkService {
                 </script>
             </body>
             </html>
-            """, amount, shortUrl, amount, currency);
+           \s""", amount, shortUrl, amount, currency);
     }
 
     /**
