@@ -120,21 +120,21 @@ public class ExternalTokenValidationFilter extends OncePerRequestFilter {
                 request.setAttribute("userId", userInfo.getUid());
                 request.setAttribute("userRole", userInfo.getRole());
 
-                filterChain.doFilter(request, response); // ✅ Continue chain
+                filterChain.doFilter(request, response); // Continue chain
             } else {
                 logger.warn("Invalid token for request: " + requestURI);
                 sendUnauthorized(response, "Invalid or expired token");
-                return; // ✅ Return after sending error
+                return; // Return after sending error
             }
 
         } catch (ResourceAccessException e) {
             logger.error("Auth server timeout/unreachable for: " + requestURI, e);
             sendServiceUnavailable(response, "Authentication service unavailable");
-            return; // ✅ Return after sending error
+            return; // Return after sending error
         } catch (Exception e) {
             logger.error("Token validation error for: " + requestURI, e);
             sendInternalError(response, "Token validation failed");
-            return; // ✅ Return after sending error
+            return; // Return after sending error
         }
     }
 
