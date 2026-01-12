@@ -104,6 +104,7 @@ public class RazorpayService {
                     .isApproved(true)
                     .isProcessed(false)
                     .isReconciled(false)
+                    .isPaymentRequest(false)
                     .build();
 
             transactionRepository.save(transaction);

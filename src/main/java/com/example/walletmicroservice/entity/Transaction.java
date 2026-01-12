@@ -72,6 +72,11 @@ public class Transaction {
     @Column(nullable = false, precision = 12, scale = 2)
     private BigDecimal amount;
 
+    @NotNull(message = "Is payment request flag is required")
+    @Column(name = "is_payment_request", nullable = false)
+    @Builder.Default
+    private Boolean isPaymentRequest = false;
+
     @NotNull(message = "Transaction type is required")
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
