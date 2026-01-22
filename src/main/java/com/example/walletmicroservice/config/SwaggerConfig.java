@@ -13,7 +13,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-// CORRECT: Use Bearer token scheme (matches your ExternalTokenValidationFilter)
 @SecurityScheme(
         name = "bearerAuth",
         type = SecuritySchemeType.HTTP,
@@ -27,7 +26,7 @@ public class SwaggerConfig {
     public OpenAPI customOpenAPI() {
         return new OpenAPI()
             .info(new Info()
-            .title("Wallet Microservice API")
+            .title("Payment Microservice API")
             .version("1.0.0")
             .description("Payment processing microservice with Razorpay integration")
             .contact(new Contact()

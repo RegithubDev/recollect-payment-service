@@ -1,23 +1,33 @@
 package com.example.walletmicroservice.service;
 
-import com.example.walletmicroservice.dto.PaymentRequestDTO;
-import com.example.walletmicroservice.dto.PaymentResponseDTO;
-import com.example.walletmicroservice.entity.Transaction;
-import com.example.walletmicroservice.repository.TransactionRepository;
-import com.razorpay.Order;
-import com.razorpay.Payment;
-import com.razorpay.RazorpayClient;
-import com.razorpay.RazorpayException;
+import com.example.walletmicroservice.dto.OrderRequestDTO;
+import com.example.walletmicroservice.dto.OrderResponseDTO;
+import com.example.walletmicroservice.dto.RefundRequestDTO;
+import com.example.walletmicroservice.entity.PaymentTransaction;
+import com.example.walletmicroservice.entity.GeneralLedger;
+import com.example.walletmicroservice.entity.ChartOfAccounts;
+import com.example.walletmicroservice.repository.PaymentTransactionRepository;
+import com.example.walletmicroservice.repository.GeneralLedgerRepository;
+import com.example.walletmicroservice.repository.ChartOfAccountsRepository;
+import com.razorpay.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.codec.binary.Hex;
 import org.json.JSONObject;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.Base64;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -25,541 +35,783 @@ import java.util.*;
 public class RazorpayService {
 
     private final RazorpayClient razorpayClient;
-    private final TransactionRepository transactionRepository;
+    private final PaymentTransactionRepository paymentTransactionRepository;
+    private final GeneralLedgerRepository generalLedgerRepository;
+    private final ChartOfAccountsRepository chartOfAccountsRepository;
 
-    @Value("${razorpay.callback.success:http://localhost:8080/api/payments/success}")
-    private String successCallbackUrl;
+    @Value("${razorpay.key.id}")
+    private String razorpayKeyId;
 
-    @Value("${razorpay.callback.failure:http://localhost:8080/api/payments/failure}")
-    private String failureCallbackUrl;
+    @Value("${razorpay.key.secret}")
+    private String razorpayKeySecret;
 
     /**
-     * Create a Razorpay order for payment
+     * API-1: Create Razorpay Order
      */
     @Transactional
-    public PaymentResponseDTO createPaymentOrder(PaymentRequestDTO request) throws RazorpayException {
-        // Generate unique receipt
-        String receiptId = "PAY" + System.currentTimeMillis() + new Random().nextInt(1000);
+    public OrderResponseDTO createOrder(OrderRequestDTO request) throws RazorpayException {
+        // Generate INTERNAL transaction ID (system's ID)
+        String internalTransactionId = "TRN" + System.currentTimeMillis() + UUID.randomUUID().toString().substring(0, 8);
 
-        // If orderId not provided, generate one
-        String orderId = request.getOrderId() != null ? request.getOrderId() : "ORD" + System.currentTimeMillis();
+        // Generate INTERNAL order ID if not provided
+        String internalOrderId = request.getOrderId();
+        if (internalOrderId == null || internalOrderId.isEmpty()) {
+            internalOrderId = "ORD" + System.currentTimeMillis() + "_" + request.getCustomerId();
+        }
 
-        try {
-            // Create order in Razorpay
-            JSONObject orderRequest = new JSONObject();
-            orderRequest.put("amount", request.getAmount().multiply(new BigDecimal("100")).longValue()); // Convert to paise
-            orderRequest.put("currency", request.getCurrency() != null ? request.getCurrency() : "INR");
-            orderRequest.put("receipt", receiptId);
-            orderRequest.put("payment_capture", 1); // Auto-capture payment
+        // Create Razorpay Order
+        JSONObject orderRequest = new JSONObject();
+        orderRequest.put("amount", request.getAmount().multiply(BigDecimal.valueOf(100)).intValue());
+        orderRequest.put("currency", request.getCurrency());
+        orderRequest.put("receipt", internalOrderId); // Internal order ID as receipt
 
-            // Add notes for tracking
+        if (request.getPaymentMethod() != null) {
             JSONObject notes = new JSONObject();
-            notes.put("userId", request.getUserId() != null ? request.getUserId().toString() : "anonymous");
-            notes.put("orderId", orderId);
-            notes.put("productId", request.getProductId());
-            notes.put("invoiceId", request.getInvoiceId());
-            notes.put("description", request.getDescription());
-
-            // Add custom metadata if provided
-            if (request.getMetadata() != null) {
-                request.getMetadata().forEach(notes::put);
-            }
-
+            notes.put("payment_method", request.getPaymentMethod());
+            notes.put("internal_order_id", internalOrderId);
+            notes.put("customer_id", request.getCustomerId());
             orderRequest.put("notes", notes);
-
-            Order order = razorpayClient.orders.create(orderRequest);
-            log.info("Razorpay order created: {}", order);
-
-            // Create transaction record
-            // In RazorpayService.createPaymentOrder()
-            Transaction transaction = Transaction.builder()
-                    .transactionId(receiptId)
-                    .userId(request.getUserId() != null ? request.getUserId() : 1L)
-                    .walletId(0L)
-                    .amount(request.getAmount())
-                    .type(Transaction.TransactionType.PAYMENT)
-                    .status(Transaction.TransactionStatus.PENDING)
-                    .paymentMethod(Transaction.PaymentMethod.RAZORPAY)
-                    .sourceType(Transaction.SourceType.RAZORPAY)
-                    .sourceReference(order.get("id"))
-                    .description(request.getDescription() != null ? request.getDescription() :
-                            "Payment for " + request.getCustomerEmail())
-                    .currency(request.getCurrency() != null ? request.getCurrency() : "INR")
-                    .feeAmount(BigDecimal.ZERO)  // EXPLICITLY SET
-                    .taxAmount(BigDecimal.ZERO)  // EXPLICITLY SET
-                    .netAmount(request.getAmount())
-                    .razorpayOrderId(order.get("id"))
-                    .referenceId(orderId)
-                    .transactionMode("ONLINE")
-                    .notes(request.getNotes())
-                    .metadata(notes != null ? notes.toString() : "{}")
-                    .createdAt(LocalDateTime.now())
-                    .updatedAt(LocalDateTime.now())
-                    // EXPLICITLY SET ALL BOOLEAN FIELDS
-                    .isRefund(false)
-                    .isDisputed(false)
-                    .isReversed(false)
-                    .isSettlement(false)
-                    .requiresApproval(false)
-                    .isApproved(true)
-                    .isProcessed(false)
-                    .isReconciled(false)
-                    .isPaymentRequest(false)
-                    .build();
-
-            transactionRepository.save(transaction);
-
-            // Build response
-            return PaymentResponseDTO.builder()
-                    .transactionId(transaction.getTransactionId())
-                    .razorpayOrderId(order.get("id"))
-                    .amount(request.getAmount())
-                    .currency(order.get("currency"))
-                    .status(order.get("status"))
-                    .description(request.getDescription())
-                    .createdAt(transaction.getCreatedAt())
-                    .callbackUrl(successCallbackUrl)
-                    .notes(request.getNotes())
-                    .customerEmail(request.getCustomerEmail())
-                    .customerPhone(request.getCustomerPhone())
-                    .build();
-
-        } catch (RazorpayException e) {
-            log.error("Error creating Razorpay order: {}", e.getMessage());
-            throw e;
         }
+
+        Order razorpayOrder = razorpayClient.orders.create(orderRequest);
+
+        // Get RAZORPAY's order ID
+        String razorpayOrderId = razorpayOrder.get("id");
+
+        // Save to payment_transactions table - BOTH IDs
+        PaymentTransaction transaction = new PaymentTransaction();
+        transaction.setCreatedAt(LocalDateTime.now());
+        transaction.setUpdatedAt(LocalDateTime.now());
+        transaction.setTransactionId(internalTransactionId); // internal ID
+        transaction.setRazorpayOrderId(razorpayOrderId); // Razorpay's order ID
+        transaction.setCustomerId(request.getCustomerId());
+        transaction.setOrderId(internalOrderId); // Your internal order ID
+        transaction.setTransactionType(PaymentTransaction.TransactionType.PAYIN);
+        transaction.setPaymentMethod(PaymentTransaction.PaymentMethod.REAL);
+        transaction.setAmount(request.getAmount());
+        transaction.setStatus(PaymentTransaction.TransactionStatus.CREATED);
+        transaction.setCurrency(request.getCurrency());
+        // Store BOTH request and response in metadata
+        JSONObject metadata = new JSONObject();
+        metadata.put("request", new JSONObject(request));
+        metadata.put("razorpay_order_response", razorpayOrder.toString());
+        metadata.put("internal_order_id", internalOrderId);
+        metadata.put("razorpay_order_id", razorpayOrderId);
+        transaction.setMetadata(metadata.toString());
+
+        paymentTransactionRepository.save(transaction);
+        // Prepare response - include BOTH IDs
+        OrderResponseDTO response = new OrderResponseDTO();
+        response.setRazorpayOrderId(razorpayOrderId); // Razorpay's ID
+        response.setTransactionId(internalTransactionId); // internal transaction ID
+        response.setAmount(request.getAmount());
+        response.setCurrency(request.getCurrency());
+        response.setCustomerId(request.getCustomerId());
+        response.setOrderId(internalOrderId); // internal order ID
+        response.setKeyId(razorpayKeyId);
+        response.setStatus("created");
+        response.setCreatedAt(razorpayOrder.get("created_at").toString());
+
+        log.info("Order created: InternalOrderId={}, RazorpayOrderId={}, Customer={}",
+                internalOrderId, razorpayOrderId, request.getCustomerId());
+
+        return response;
     }
 
     /**
-     * Verify payment and update transaction
+     * Get Payment Transaction by ID
      */
-    @Transactional
-    public Transaction verifyPayment(String razorpayPaymentId, String razorpayOrderId, String razorpaySignature) {
-        try {
-            // Verify payment signature
-            boolean isValidSignature = verifySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
-
-            if (!isValidSignature) {
-                throw new RuntimeException("Invalid payment signature");
-            }
-
-            // Fetch payment details from Razorpay
-            Payment payment = razorpayClient.payments.fetch(razorpayPaymentId);
-
-            // Find transaction by order ID
-            Transaction transaction = transactionRepository.findByRazorpayOrderId(razorpayOrderId)
-                    .orElseThrow(() -> new RuntimeException("Transaction not found"));
-
-            if (payment.get("status").equals("captured")) {
-                // Update transaction as completed
-                transaction.setRazorpayPaymentId(razorpayPaymentId);
-                transaction.setReferenceId(payment.get("id"));
-                transaction.markCompleted(); // No wallet balance tracking
-                transaction.setProcessed(true);
-                transaction.setProcessedAt(LocalDateTime.now());
-
-                // Capture payment method details
-                JSONObject paymentDetails = new JSONObject(payment.toString());
-                if (paymentDetails.has("method")) {
-                    transaction.setPaymentMethod(
-                            Transaction.PaymentMethod.valueOf(paymentDetails.getString("method").toUpperCase())
-                    );
-                }
-
-                log.info("Payment verified successfully for order: {}", razorpayOrderId);
-            } else {
-                transaction.markFailed("Payment not captured");
-                log.warn("Payment not captured for order: {}", razorpayOrderId);
-            }
-
-            return transactionRepository.save(transaction);
-
-        } catch (RazorpayException e) {
-            log.error("Error verifying payment: {}", e.getMessage());
-            throw new RuntimeException("Payment verification failed", e);
-        }
+    public PaymentTransaction getPaymentTransaction(String transactionId) {
+        return paymentTransactionRepository.findByTransactionId(transactionId)
+                .orElseThrow(() -> new RuntimeException("Payment transaction not found: " + transactionId));
     }
 
     /**
-     * Verify Razorpay signature
+     * Verify Payment Signature (for QR code/UPI payments)
      */
-    private boolean verifySignature(String razorpayOrderId, String razorpayPaymentId, String razorpaySignature) {
+    // 1️⃣ Verify signature only
+    public boolean verifySignature(String paymentId, String orderId, String signature) {
         try {
-            // For testing, skip signature verification
-            if (isTestMode()) {
-                log.warn("TEST MODE: Skipping signature verification");
-                return true;
-            }
+            String payload = orderId + "|" + paymentId;
 
-            String payload = razorpayOrderId + "|" + razorpayPaymentId;
-            String secret = "ZGmyOTRuMxQnOwMKZU623UZt"; // Get from properties
+            Mac mac = Mac.getInstance("HmacSHA256");
+            SecretKeySpec key =
+                    new SecretKeySpec(razorpayKeySecret.trim().getBytes(StandardCharsets.UTF_8), "HmacSHA256");
+            mac.init(key);
+            byte[] hash = mac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
 
-            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(), "HmacSHA256"));
-            byte[] signature = mac.doFinal(payload.getBytes());
+            String generated = Hex.encodeHexString(hash);
 
-            String generatedSignature = bytesToHex(signature);
-            return generatedSignature.equals(razorpaySignature);
-
+            return generated.equals(signature.trim());
         } catch (Exception e) {
-            log.error("Error verifying signature: {}", e.getMessage());
+            log.error("Signature verification failed", e);
             return false;
         }
     }
 
-    private boolean isTestMode() {
-        // Check if we're in test mode
-        return true; // Set to false for production
-    }
-
-    private String bytesToHex(byte[] bytes) {
-        StringBuilder result = new StringBuilder();
-        for (byte b : bytes) {
-            result.append(String.format("%02x", b));
-        }
-        return result.toString();
-    }
-
-    /**
-     * Handle Razorpay webhook events
-     */
-    @Transactional
-    public void handleWebhook(Map<String, Object> webhookData) {
+    public String getPaymentStatus(String paymentId, String orderId) {
         try {
-            String event = (String) webhookData.get("event");
-            Map<String, Object> payload = (Map<String, Object>) webhookData.get("payload");
+            Payment payment = razorpayClient.payments.fetch(paymentId);
 
-            if (payload == null) {
-                log.error("Webhook payload is null");
-                return;
+            String status = payment.get("status").toString(); // captured / authorized / failed
+            String method = payment.get("method").toString().toUpperCase();
+
+            List<PaymentTransaction> transactions = paymentTransactionRepository.findAllByRazorpayOrderId(orderId);
+
+            for (PaymentTransaction transaction : transactions) {
+                transaction.setRazorpayPaymentId(paymentId);
+                transaction.setStatus(PaymentTransaction.TransactionStatus.valueOf(status.toUpperCase()));
+                transaction.setPaymentMethod(PaymentTransaction.PaymentMethod.valueOf(method.toUpperCase()));
+                paymentTransactionRepository.save(transaction);
             }
 
-            Map<String, Object> paymentEntity = (Map<String, Object>) payload.get("payment");
-            if (paymentEntity == null) {
-                paymentEntity = (Map<String, Object>) payload.get("payment_link");
-            }
-
-            if (paymentEntity == null) {
-                log.error("Payment entity not found in webhook");
-                return;
-            }
-
-            String paymentId = (String) paymentEntity.get("id");
-            String orderId = (String) paymentEntity.get("order_id");
-
-            switch (event) {
-                case "payment.captured":
-                    handlePaymentCaptured(paymentId, orderId, paymentEntity);
-                    break;
-                case "payment.failed":
-                    handlePaymentFailed(paymentId, orderId, paymentEntity);
-                    break;
-                case "payment.refunded":
-                    handlePaymentRefunded(paymentId, orderId, paymentEntity);
-                    break;
-                case "refund.created":
-                    handleRefundCreated(paymentId, orderId, paymentEntity);
-                    break;
-                case "order.paid":
-                    handleOrderPaid(orderId, paymentEntity);
-                    break;
-                default:
-                    log.info("Unhandled webhook event: {}", event);
-            }
+            return switch (status) {
+                case "created" -> "PENDING";
+                case "captured" -> "Payment SUCCESS";
+                case "authorized" -> "Payment AUTHORIZED (not yet captured)";
+                case "failed" -> "Payment FAILED";
+                default -> "Payment PENDING";
+            };
 
         } catch (Exception e) {
-            log.error("Error handling webhook: {}", e.getMessage(), e);
+            log.error("Fetching payment status failed", e);
+            return "Error fetching payment status";
         }
     }
 
-    private void handlePaymentCaptured(String paymentId, String orderId, Map<String, Object> paymentEntity) {
-        Transaction transaction = transactionRepository.findByRazorpayOrderId(orderId)
-                .orElse(null);
-
-        // FIX: Use getter isProcessed() instead of setter setProcessed()
-        if (transaction != null && !transaction.getIsProcessed()) {
-            BigDecimal amount = new BigDecimal(paymentEntity.get("amount").toString())
-                    .divide(new BigDecimal("100"));
-
-            transaction.setRazorpayPaymentId(paymentId);
-            transaction.markCompleted(); // Just for tracking
-            transaction.setProcessed(true);
-            // Update payment method from webhook
-            String method = (String) paymentEntity.get("method");
-            if (method != null) {
-                try {
-                    transaction.setPaymentMethod(Transaction.PaymentMethod.valueOf(method.toUpperCase()));
-                } catch (IllegalArgumentException e) {
-                    log.warn("Unknown payment method: {}", method);
-                }
-            }
-
-            transactionRepository.save(transaction);
-
-            log.info("Webhook: Payment captured for order: {}", orderId);
-        }
-    }
-
-    private void handlePaymentFailed(String paymentId, String orderId, Map<String, Object> paymentEntity) {
-        Transaction transaction = transactionRepository.findByRazorpayOrderId(orderId)
-                .orElse(null);
-
-        if (transaction != null) {
-            String errorDescription = (String) paymentEntity.get("error_description");
-            String errorCode = (String) paymentEntity.get("error_code");
-
-            String failureReason = errorDescription != null ? errorDescription : "Payment failed";
-            if (errorCode != null) {
-                failureReason = "[" + errorCode + "] " + failureReason;
-            }
-
-            transaction.markFailed(failureReason);
-            transactionRepository.save(transaction);
-
-            log.warn("Webhook: Payment failed for order: {}, reason: {}", orderId, failureReason);
-        }
-    }
-
-    private void handlePaymentRefunded(String paymentId, String orderId, Map<String, Object> paymentEntity) {
-        Transaction transaction = transactionRepository.findByRazorpayPaymentId(paymentId)
-                .orElse(null);
-
-        if (transaction != null) {
-            // Create refund transaction
-            BigDecimal refundAmount = new BigDecimal(paymentEntity.get("amount_refunded").toString())
-                    .divide(new BigDecimal("100"));
-
-            Transaction refundTransaction = Transaction.builder()
-                    .userId(transaction.getUserId())
-                    .amount(refundAmount)
-                    .type(Transaction.TransactionType.REFUND)
-                    .status(Transaction.TransactionStatus.COMPLETED)
-                    .paymentMethod(Transaction.PaymentMethod.RAZORPAY)
-                    .sourceType(Transaction.SourceType.REFUND)
-                    .sourceReference(paymentId)
-                    .description("Refund for payment: " + paymentId)
-                    .currency(transaction.getCurrency())
-                    .netAmount(refundAmount)
-                    .razorpayPaymentId(paymentId)
-                    .referenceId((String) paymentEntity.get("refund_id"))
-                    .parentTransactionId(transaction.getTransactionId())
-                    .isRefund(true)
-                    .isProcessed(true)
-                    .processedAt(LocalDateTime.now())
-                    .metadata(paymentEntity.toString())
-                    .createdAt(LocalDateTime.now())
-                    .updatedAt(LocalDateTime.now())
-                    .build();
-
-            transactionRepository.save(refundTransaction);
-            transaction.markRefunded();
-            transactionRepository.save(transaction);
-
-            log.info("Webhook: Payment refunded for payment: {}", paymentId);
-        }
-    }
-
-    private void handleRefundCreated(String paymentId, String orderId, Map<String, Object> refundEntity) {
-        log.info("Refund created: {}", refundEntity);
-        // Handle refund creation separately if needed
-    }
-
-    private void handleOrderPaid(String orderId, Map<String, Object> orderEntity) {
-        log.info("Order paid: {}", orderEntity);
-        // Handle order paid event
-    }
 
     /**
-     * Get payment status
-     */
-    public Map<String, Object> getPaymentStatus(String transactionId) throws RazorpayException {
-        Transaction transaction = transactionRepository.findByTransactionId(transactionId)
-                .orElseThrow(() -> new RuntimeException("Transaction not found"));
-
-        Map<String, Object> status = new HashMap<>();
-        status.put("transactionId", transaction.getTransactionId());
-        status.put("razorpayOrderId", transaction.getRazorpayOrderId());
-        status.put("razorpayPaymentId", transaction.getRazorpayPaymentId());
-        status.put("amount", transaction.getAmount());
-        status.put("status", transaction.getStatus().toString());
-        status.put("currency", transaction.getCurrency());
-        status.put("createdAt", transaction.getCreatedAt());
-        status.put("processedAt", transaction.getProcessedAt());
-        status.put("description", transaction.getDescription());
-        status.put("paymentMethod", transaction.getPaymentMethod());
-        status.put("referenceId", transaction.getReferenceId());
-
-        if (transaction.getRazorpayPaymentId() != null) {
-            try {
-                Payment payment = razorpayClient.payments.fetch(transaction.getRazorpayPaymentId());
-                status.put("razorpayPaymentStatus", payment.get("status"));
-                status.put("razorpayPaymentMethod", payment.get("method"));
-                status.put("razorpayBank", payment.get("bank"));
-                status.put("razorpayCardId", payment.get("card_id"));
-                status.put("razorpayVpa", payment.get("vpa"));
-                status.put("razorpayWallet", payment.get("wallet"));
-                status.put("razorpayEmail", payment.get("email"));
-                status.put("razorpayContact", payment.get("contact"));
-            } catch (RazorpayException e) {
-                log.warn("Could not fetch payment details from Razorpay: {}", e.getMessage());
-            }
-        }
-
-        return status;
-    }
-
-    /**
-     * Get all transactions for a user
-     */
-    public List<Transaction> getUserTransactions(Long userId) {
-        return transactionRepository.findByUserId(userId);
-    }
-
-    /**
-     * Get transaction by razorpay order ID
-     */
-    public Optional<Transaction> getTransactionByOrderId(String razorpayOrderId) {
-        return transactionRepository.findByRazorpayOrderId(razorpayOrderId);
-    }
-
-    /**
-     * Create a refund for a payment
+     * API-3: Handle Razorpay Webhook
      */
     @Transactional
-    public Map<String, Object> createRefund(String razorpayPaymentId, BigDecimal amount, String notes) throws RazorpayException {
-        try {
-            // Create refund in Razorpay
-            JSONObject refundRequest = new JSONObject();
-            refundRequest.put("payment_id", razorpayPaymentId);
+    public void handleWebhook(JSONObject webhookPayload) {
+        String event = webhookPayload.getString("event");
+        String entity = webhookPayload.getString("entity");
 
-            if (amount != null) {
-                refundRequest.put("amount", amount.multiply(new BigDecimal("100")).longValue());
-            }
+        log.info("Received webhook event: {} for entity: {}", event, entity);
 
-            if (notes != null) {
-                refundRequest.put("notes", new JSONObject().put("reason", notes));
-            }
-
-            // Call Razorpay API
-            com.razorpay.Refund refund = razorpayClient.payments.refund(razorpayPaymentId, refundRequest);
-
-            // Find original transaction
-            Transaction originalTransaction = transactionRepository.findByRazorpayPaymentId(razorpayPaymentId)
-                    .orElseThrow(() -> new RuntimeException("Original transaction not found"));
-
-            // Create refund transaction record
-            BigDecimal refundAmount = new BigDecimal(refund.get("amount").toString())
-                    .divide(new BigDecimal("100"));
-
-            Transaction refundTransaction = Transaction.builder()
-                    .userId(originalTransaction.getUserId())
-                    .amount(refundAmount)
-                    .type(Transaction.TransactionType.REFUND)
-                    .status(Transaction.TransactionStatus.COMPLETED)
-                    .paymentMethod(Transaction.PaymentMethod.RAZORPAY)
-                    .sourceType(Transaction.SourceType.REFUND)
-                    .sourceReference(refund.get("id"))
-                    .description("Manual refund: " + (notes != null ? notes : "Refund initiated"))
-                    .currency(originalTransaction.getCurrency())
-                    .netAmount(refundAmount)
-                    .razorpayPaymentId(razorpayPaymentId)
-                    .referenceId(refund.get("id"))
-                    .parentTransactionId(originalTransaction.getTransactionId())
-                    .isRefund(true)
-                    .isProcessed(true)
-                    .processedAt(LocalDateTime.now())
-                    .notes(notes)
-                    .metadata(refund.toString())
-                    .createdAt(LocalDateTime.now())
-                    .updatedAt(LocalDateTime.now())
-                    .build();
-
-            transactionRepository.save(refundTransaction);
-
-            // Mark original transaction as refunded
-            originalTransaction.markRefunded();
-            transactionRepository.save(originalTransaction);
-
-            Map<String, Object> response = new HashMap<>();
-            response.put("refundId", refund.get("id"));
-            response.put("amount", refundAmount);
-            response.put("status", refund.get("status"));
-            response.put("transactionId", refundTransaction.getTransactionId());
-            response.put("message", "Refund initiated successfully");
-
-            return response;
-
-        } catch (RazorpayException e) {
-            log.error("Error creating refund: {}", e.getMessage());
-            throw e;
+        switch (event) {
+            case "payment.captured":
+                handlePaymentCaptured(webhookPayload);
+                break;
+            case "payment.failed":
+                handlePaymentFailed(webhookPayload);
+                break;
+            case "refund.created":
+                handleRefundCreated(webhookPayload);
+                break;
+            case "refund.processed":
+                handleRefundProcessed(webhookPayload);
+                break;
+//            case "payout.processed":
+//                handlePayoutProcessed(webhookPayload);
+//                break;
+//            case "payout.failed":
+//                handlePayoutFailed(webhookPayload);
+//                break;
+            default:
+                log.warn("Unhandled webhook event: {}", event);
         }
+    }
+
+    private void handlePaymentCaptured(JSONObject webhookPayload) {
+        JSONObject payment = webhookPayload.getJSONObject("payload").getJSONObject("payment");
+        String razorpayPaymentId = payment.getString("id");
+        String razorpayOrderId = payment.getString("order_id");
+
+        // Find the transaction
+        PaymentTransaction transaction = (PaymentTransaction) paymentTransactionRepository
+                .findAllByRazorpayOrderId(razorpayOrderId);
+        // Update transaction
+        transaction.setRazorpayPaymentId(razorpayPaymentId);
+        transaction.setStatus(PaymentTransaction.TransactionStatus.CAPTURED);
+
+        String method = payment.optString("method", "unknown").toUpperCase();
+        try {
+            transaction.setPaymentMethod(PaymentTransaction.PaymentMethod.valueOf(method));
+        } catch (IllegalArgumentException e) {
+            transaction.setPaymentMethod(PaymentTransaction.PaymentMethod.REAL);
+        }
+
+        transaction.setMetadata(new JSONObject(transaction.getMetadata() != null ? transaction.getMetadata() : "{}")
+                .put("webhook_payload", webhookPayload.toString())
+                .toString());
+
+        PaymentTransaction savedTransaction = paymentTransactionRepository.save(transaction);
+
+        // Create General Ledger entries (Double Entry) - NO ManyToOne
+        createPayInLedgerEntries(savedTransaction, method);
+
+        log.info("Payment captured for order: {}, payment: {}", razorpayOrderId, razorpayPaymentId);
     }
 
     /**
-     * Capture authorized payment (for manual capture)
+     * Create PAYIN ledger entries (Payment captured)
+     */
+    private void createPayInLedgerEntries(PaymentTransaction transaction, String paymentMethod) {
+        // Get account details from master table
+        ChartOfAccounts companyBankAccount = chartOfAccountsRepository.findById("Company Bank A/C")
+                .orElseThrow(() -> new RuntimeException("Account not found: Company Bank A/C"));
+
+        ChartOfAccounts salesRevenueAccount = chartOfAccountsRepository.findById("Sales Revenue")
+                .orElseThrow(() -> new RuntimeException("Account not found: Sales Revenue"));
+
+        String ledgerRef = "PAYIN-" + System.currentTimeMillis();
+
+        // Create Debit Entry (Company Bank A/C)
+        GeneralLedger debitEntry = createLedgerEntry(
+                transaction.getId().toString(),
+                transaction.getTransactionId(),
+                ledgerRef,
+                transaction.getCustomerId(),
+                transaction.getOrderId(),
+                transaction.getAmount(),
+                "Payment received via " + paymentMethod + " for order: " + transaction.getOrderId(),
+                companyBankAccount,
+                GeneralLedger.EntryType.DEBIT
+        );
+
+        // Create Credit Entry (Sales Revenue)
+        GeneralLedger creditEntry = createLedgerEntry(
+                transaction.getId().toString(),
+                transaction.getTransactionId(),
+                ledgerRef,
+                transaction.getCustomerId(),
+                transaction.getOrderId(),
+                transaction.getAmount(),
+                "Sales revenue from order: " + transaction.getOrderId(),
+                salesRevenueAccount,
+                GeneralLedger.EntryType.CREDIT
+        );
+
+        generalLedgerRepository.save(debitEntry);
+        generalLedgerRepository.save(creditEntry);
+
+        log.info("Created PAYIN ledger entries for transaction: {}", transaction.getTransactionId());
+    }
+
+    /**
+     * Helper method to create ledger entry with copied account values
+     */
+    private GeneralLedger createLedgerEntry(String paymentTransactionId,
+                                            String transactionId,
+                                            String ledgerRef,
+                                            String customerId,
+                                            String orderId,
+                                            BigDecimal amount,
+                                            String description,
+                                            ChartOfAccounts account,
+                                            GeneralLedger.EntryType entryType) {
+
+        GeneralLedger entry = new GeneralLedger();
+        entry.setLedgerEntryId(generateLedgerEntryId(entryType));
+        entry.setPaymentTransactionId(paymentTransactionId);
+        entry.setTransactionId(transactionId);
+        entry.setEntryDate(LocalDate.now());
+        entry.setCustomerId(customerId);
+        entry.setOrderId(orderId);
+
+        // Copy ALL values from ChartOfAccounts (no relationship)
+        entry.setAccountId(account.getAccountId());
+        entry.setAccountName(account.getAccountName());
+        entry.setAccountType(account.getAccountType().name());
+        entry.setNormalBalance(account.getNormalBalance().name());
+        entry.setLedgerType(account.getLedgerType().name());
+        entry.setEntryType(entryType);
+        entry.setAmount(amount);
+        entry.setDescription(description);
+        entry.setIsReversed(false);
+
+        return entry;
+    }
+
+    private String generateLedgerEntryId(GeneralLedger.EntryType entryType) {
+        String prefix = entryType == GeneralLedger.EntryType.DEBIT ? "DEB" : "CRED";
+        return prefix + "-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 4).toUpperCase();
+    }
+
+    private void handlePaymentFailed(JSONObject webhookPayload) {
+        JSONObject payment = webhookPayload.getJSONObject("payload").getJSONObject("payment");
+        String razorpayPaymentId = payment.getString("id");
+        String razorpayOrderId = payment.getString("order_id");
+
+        PaymentTransaction transaction = (PaymentTransaction) paymentTransactionRepository
+                .findAllByRazorpayOrderId(razorpayOrderId);
+
+        transaction.setStatus(PaymentTransaction.TransactionStatus.FAILED);
+        transaction.setMetadata(new JSONObject(transaction.getMetadata() != null ? transaction.getMetadata() : "{}")
+                .put("webhook_payload", webhookPayload.toString())
+                .toString());
+
+        paymentTransactionRepository.save(transaction);
+
+        log.warn("Payment failed for order: {}, payment: {}", razorpayOrderId, razorpayPaymentId);
+    }
+
+    /**
+     * API-4: Create Refund
      */
     @Transactional
-    public Map<String, Object> capturePayment(String razorpayPaymentId, BigDecimal amount) throws RazorpayException {
-        try {
-            JSONObject captureRequest = new JSONObject();
-            captureRequest.put("amount", amount.multiply(new BigDecimal("100")).longValue());
+    public PaymentTransaction createRefund(RefundRequestDTO request) throws RazorpayException {
+        // Find the original payment transaction
+        PaymentTransaction originalTransaction = paymentTransactionRepository
+                .findByTransactionId(request.getPaymentTransactionId())
+                .orElseThrow(() -> new RuntimeException("Payment transaction not found: " + request.getPaymentTransactionId()));
 
-            com.razorpay.Payment payment = razorpayClient.payments.capture(razorpayPaymentId, captureRequest);
-
-            // Update transaction status
-            Transaction transaction = transactionRepository.findByRazorpayPaymentId(razorpayPaymentId)
-                    .orElse(null);
-
-            if (transaction != null) {
-                transaction.markCompleted();
-                transaction.setProcessed(true);
-                transaction.setProcessedAt(LocalDateTime.now());
-                transactionRepository.save(transaction);
-            }
-
-            Map<String, Object> response = new HashMap<>();
-            response.put("paymentId", payment.get("id"));
-            response.put("amount", new BigDecimal(payment.get("amount").toString()).divide(new BigDecimal("100")));
-            response.put("status", payment.get("status"));
-            response.put("captured", payment.get("captured"));
-            response.put("message", "Payment captured successfully");
-
-            return response;
-
-        } catch (RazorpayException e) {
-            log.error("Error capturing payment: {}", e.getMessage());
-            throw e;
+        // Check if refund is possible
+        if (!originalTransaction.getStatus().equals(PaymentTransaction.TransactionStatus.CAPTURED)) {
+            throw new RuntimeException("Cannot refund unsuccessful payment");
         }
+
+        if (originalTransaction.getRefundStatus() != null &&
+                originalTransaction.getRefundStatus().equals(PaymentTransaction.RefundStatus.PROCESSED)) {
+            throw new RuntimeException("Refund already processed");
+        }
+
+        // Create Razorpay refund
+        JSONObject refundRequest = new JSONObject();
+        refundRequest.put("amount", request.getAmount().multiply(BigDecimal.valueOf(100)).intValue());
+        refundRequest.put("speed", "normal");
+
+        if (request.getReason() != null) {
+            refundRequest.put("receipt", "Refund for: " + originalTransaction.getOrderId());
+        }
+
+        if (request.getNotes() != null) {
+            refundRequest.put("notes", new JSONObject(request.getNotes()));
+        }
+
+        Refund razorpayRefund = razorpayClient.payments.refund(
+                originalTransaction.getRazorpayPaymentId(),
+                refundRequest
+        );
+
+        // Create new transaction for refund
+        String refundTransactionId = "RFND" + System.currentTimeMillis() + UUID.randomUUID().toString().substring(0, 8);
+
+        PaymentTransaction refundTransaction = new PaymentTransaction();
+        refundTransaction.setTransactionId(refundTransactionId);
+        refundTransaction.setRazorpayPaymentId(originalTransaction.getRazorpayPaymentId());
+        refundTransaction.setRazorpayRefundId(razorpayRefund.get("id"));
+        refundTransaction.setCustomerId(originalTransaction.getCustomerId());
+        refundTransaction.setOrderId(originalTransaction.getOrderId());
+        refundTransaction.setTransactionType(PaymentTransaction.TransactionType.REFUND);
+        refundTransaction.setPaymentMethod(originalTransaction.getPaymentMethod());
+        refundTransaction.setAmount(request.getAmount());
+        refundTransaction.setCurrency(originalTransaction.getCurrency());
+        refundTransaction.setStatus(PaymentTransaction.TransactionStatus.AUTHORIZED);
+        refundTransaction.setRefundStatus(PaymentTransaction.RefundStatus.PROCESSED);
+        refundTransaction.setMetadata(new JSONObject()
+                .put("razorpay_refund_response", razorpayRefund.toJson())
+                .put("refund_reason", request.getReason())
+                .toString());
+
+        PaymentTransaction savedRefundTransaction = paymentTransactionRepository.save(refundTransaction);
+
+        // Update original transaction
+        originalTransaction.setRefundStatus(PaymentTransaction.RefundStatus.PROCESSED);
+        originalTransaction.setRefundApprovedAt(java.time.LocalDateTime.now());
+        paymentTransactionRepository.save(originalTransaction);
+
+        // Create General Ledger entries for refund - NO ManyToOne
+        createRefundLedgerEntries(savedRefundTransaction, originalTransaction);
+
+        log.info("Refund created: {} for payment: {}", razorpayRefund.get("id"), originalTransaction.getRazorpayPaymentId());
+
+        return savedRefundTransaction;
     }
+
+    /**
+     * Create REFUND ledger entries
+     */
+    private void createRefundLedgerEntries(PaymentTransaction refundTransaction,
+                                           PaymentTransaction originalTransaction) {
+
+        ChartOfAccounts salesRevenueAccount = chartOfAccountsRepository.findById("Sales Revenue")
+                .orElseThrow(() -> new RuntimeException("Account not found: Sales Revenue"));
+
+        ChartOfAccounts refundPayableAccount = chartOfAccountsRepository.findById("Customer Refund Payable")
+                .orElseThrow(() -> new RuntimeException("Account not found: Customer Refund Payable"));
+
+        String ledgerRef = "REFUND-" + System.currentTimeMillis();
+
+        // Debit Sales Revenue (Reversal)
+        GeneralLedger debitEntry = createLedgerEntry(
+                refundTransaction.getId().toString(),
+                refundTransaction.getTransactionId(),
+                ledgerRef,
+                refundTransaction.getCustomerId(),
+                refundTransaction.getOrderId(),
+                refundTransaction.getAmount(),
+                "Refund issued for order: " + refundTransaction.getOrderId() +
+                        " (Original TXN: " + originalTransaction.getTransactionId() + ")",
+                salesRevenueAccount,
+                GeneralLedger.EntryType.DEBIT
+        );
+
+        // Credit Customer Refund Payable
+        GeneralLedger creditEntry = createLedgerEntry(
+                refundTransaction.getId().toString(),
+                refundTransaction.getTransactionId(),
+                ledgerRef,
+                refundTransaction.getCustomerId(),
+                refundTransaction.getOrderId(),
+                refundTransaction.getAmount(),
+                "Refund payable to customer for order: " + refundTransaction.getOrderId(),
+                refundPayableAccount,
+                GeneralLedger.EntryType.CREDIT
+        );
+
+        generalLedgerRepository.save(debitEntry);
+        generalLedgerRepository.save(creditEntry);
+
+        log.info("Created REFUND ledger entries for transaction: {}", refundTransaction.getTransactionId());
+    }
+
+    private void handleRefundCreated(JSONObject webhookPayload) {
+        JSONObject refund = webhookPayload.getJSONObject("payload").getJSONObject("refund");
+        String razorpayRefundId = refund.getString("id");
+        String razorpayPaymentId = refund.getString("payment_id");
+
+        log.info("Refund created: {} for payment: {}", razorpayRefundId, razorpayPaymentId);
+    }
+
+    private void handleRefundProcessed(JSONObject webhookPayload) {
+        JSONObject refund = webhookPayload.getJSONObject("payload").getJSONObject("refund");
+        String razorpayRefundId = refund.getString("id");
+        String razorpayPaymentId = refund.getString("payment_id");
+
+        // Find refund transaction
+        PaymentTransaction refundTransaction = paymentTransactionRepository
+                .findByRazorpayRefundId(razorpayRefundId)
+                .orElseThrow(() -> new RuntimeException("Refund transaction not found: " + razorpayRefundId));
+
+        // Update status
+        refundTransaction.setStatus(PaymentTransaction.TransactionStatus.AUTHORIZED);
+        refundTransaction.setMetadata(new JSONObject(refundTransaction.getMetadata() != null ? refundTransaction.getMetadata() : "{}")
+                .put("webhook_payload", webhookPayload.toString())
+                .toString());
+
+        PaymentTransaction savedTransaction = paymentTransactionRepository.save(refundTransaction);
+
+        // Create refund payout GL entries - NO ManyToOne
+        createRefundPayoutLedgerEntries(savedTransaction);
+
+        log.info("Refund processed: {} for payment: {}", razorpayRefundId, razorpayPaymentId);
+    }
+
+    /**
+     * Create REFUND PAYOUT ledger entries (when refund is processed/bank transfer)
+     */
+    private void createRefundPayoutLedgerEntries(PaymentTransaction refundTransaction) {
+
+        ChartOfAccounts refundPayableAccount = chartOfAccountsRepository.findById("Customer Refund Payable")
+                .orElseThrow(() -> new RuntimeException("Account not found: Customer Refund Payable"));
+
+        ChartOfAccounts companyBankAccount = chartOfAccountsRepository.findById("Company Bank A/C")
+                .orElseThrow(() -> new RuntimeException("Account not found: Company Bank A/C"));
+
+        String ledgerRef = "REFUND-PAYOUT-" + System.currentTimeMillis();
+
+        // Debit Customer Refund Payable
+        GeneralLedger debitEntry = createLedgerEntry(
+                refundTransaction.getId().toString(),
+                refundTransaction.getTransactionId(),
+                ledgerRef,
+                refundTransaction.getCustomerId(),
+                refundTransaction.getOrderId(),
+                refundTransaction.getAmount(),
+                "Refund payout to customer for order: " + refundTransaction.getOrderId(),
+                refundPayableAccount,
+                GeneralLedger.EntryType.DEBIT
+        );
+
+        // Credit Company Bank A/C
+        GeneralLedger creditEntry = createLedgerEntry(
+                refundTransaction.getId().toString(),
+                refundTransaction.getTransactionId(),
+                ledgerRef,
+                refundTransaction.getCustomerId(),
+                refundTransaction.getOrderId(),
+                refundTransaction.getAmount(),
+                "Bank transfer for refund of order: " + refundTransaction.getOrderId(),
+                companyBankAccount,
+                GeneralLedger.EntryType.CREDIT
+        );
+
+        generalLedgerRepository.save(debitEntry);
+        generalLedgerRepository.save(creditEntry);
+
+        log.info("Created REFUND PAYOUT ledger entries for transaction: {}", refundTransaction.getTransactionId());
+    }
+
+//    private void handlePayoutProcessed(JSONObject webhookPayload) {
+//        JSONObject payout = webhookPayload.getJSONObject("payload").getJSONObject("payout");
+//        String razorpayPayoutId = payout.getString("id");
+//
+//        log.info("Payout processed: {}", razorpayPayoutId);
+//
+//        // Find wallet withdrawal transaction
+//        paymentTransactionRepository.findByRazorpayPayoutId(razorpayPayoutId)
+//                .ifPresent(transaction -> {
+//                    transaction.setStatus(PaymentTransaction.TransactionStatus.SUCCESS);
+//                    PaymentTransaction savedTransaction = paymentTransactionRepository.save(transaction);
+//
+//                    // Create GL entries for successful payout - NO ManyToOne
+//                    createPayoutProcessedLedgerEntries(savedTransaction);
+//                });
+//    }
+
+    /**
+     * Create PAYOUT PROCESSED ledger entries (wallet withdrawal bank transfer)
+     */
+    private void createPayoutProcessedLedgerEntries(PaymentTransaction payoutTransaction) {
+
+        ChartOfAccounts payoutClearingAccount = chartOfAccountsRepository.findById("Payout Pending / Clearing")
+                .orElseThrow(() -> new RuntimeException("Account not found: Payout Pending / Clearing"));
+
+        ChartOfAccounts companyBankAccount = chartOfAccountsRepository.findById("Company Bank A/C")
+                .orElseThrow(() -> new RuntimeException("Account not found: Company Bank A/C"));
+
+        String ledgerRef = "PAYOUT-" + System.currentTimeMillis();
+
+        // Debit Payout Pending / Clearing
+        GeneralLedger debitEntry = createLedgerEntry(
+                payoutTransaction.getId().toString(),
+                payoutTransaction.getTransactionId(),
+                ledgerRef,
+                payoutTransaction.getCustomerId(),
+                payoutTransaction.getOrderId(),
+                payoutTransaction.getAmount(),
+                "Payout processed to customer bank for withdrawal",
+                payoutClearingAccount,
+                GeneralLedger.EntryType.DEBIT
+        );
+
+        // Credit Company Bank A/C
+        GeneralLedger creditEntry = createLedgerEntry(
+                payoutTransaction.getId().toString(),
+                payoutTransaction.getTransactionId(),
+                ledgerRef,
+                payoutTransaction.getCustomerId(),
+                payoutTransaction.getOrderId(),
+                payoutTransaction.getAmount(),
+                "Bank transfer for customer withdrawal",
+                companyBankAccount,
+                GeneralLedger.EntryType.CREDIT
+        );
+
+        generalLedgerRepository.save(debitEntry);
+        generalLedgerRepository.save(creditEntry);
+
+        log.info("Created PAYOUT PROCESSED ledger entries for transaction: {}", payoutTransaction.getTransactionId());
+    }
+
+//    private void handlePayoutFailed(JSONObject webhookPayload) {
+//        JSONObject payout = webhookPayload.getJSONObject("payload").getJSONObject("payout");
+//        String razorpayPayoutId = payout.getString("id");
+//        String failureReason = payout.optString("failure_reason", "Unknown");
+//
+//        log.error("Payout failed: {}, reason: {}", razorpayPayoutId, failureReason);
+//
+//        // Update wallet withdrawal transaction if exists
+//        paymentTransactionRepository.findByRazorpayPayoutId(razorpayPayoutId)
+//                .ifPresent(transaction -> {
+//                    transaction.setStatus(PaymentTransaction.TransactionStatus.FAILED);
+//                    transaction.setMetadata(new JSONObject(transaction.getMetadata() != null ? transaction.getMetadata() : "{}")
+//                            .put("failure_reason", failureReason)
+//                            .toString());
+//                    paymentTransactionRepository.save(transaction);
+//                });
+//    }
 
     /**
      * Get payment details from Razorpay
      */
-    public Map<String, Object> getPaymentDetails(String razorpayPaymentId) throws RazorpayException {
+    public JSONObject getPaymentDetails(String razorpayPaymentId) throws RazorpayException {
+        return razorpayClient.payments.fetch(razorpayPaymentId).toJson();
+    }
+
+    /**
+     * Get order details from Razorpay
+     */
+    public JSONObject getOrderDetails(String razorpayOrderId) throws RazorpayException {
+        return razorpayClient.orders.fetch(razorpayOrderId).toJson();
+    }
+
+    /**
+     * Additional helper methods for wallet operations
+     */
+
+    /**
+     * Create wallet transfer transaction
+     */
+    @Transactional
+    public PaymentTransaction createWalletTransfer(String customerId, String orderId, BigDecimal amount, String description) {
+        String transactionId = "WALLET" + System.currentTimeMillis() + UUID.randomUUID().toString().substring(0, 8);
+
+        PaymentTransaction transaction = new PaymentTransaction();
+        transaction.setTransactionId(transactionId);
+        transaction.setCustomerId(customerId);
+        transaction.setOrderId(orderId);
+        transaction.setTransactionType(PaymentTransaction.TransactionType.WALLET_TRANSFER);
+        transaction.setPaymentMethod(PaymentTransaction.PaymentMethod.WALLET);
+        transaction.setAmount(amount);
+        transaction.setCurrency("INR");
+        transaction.setStatus(PaymentTransaction.TransactionStatus.CAPTURED);
+        transaction.setIsWalletTransfer(true);
+        transaction.setMetadata(new JSONObject()
+                .put("description", description)
+                .toString());
+
+        PaymentTransaction savedTransaction = paymentTransactionRepository.save(transaction);
+
+        // Create GL entries for wallet transfer - NO ManyToOne
+        createWalletTransferLedgerEntries(savedTransaction, description);
+
+        return savedTransaction;
+    }
+
+    /**
+     * Create WALLET TRANSFER ledger entries
+     */
+    private void createWalletTransferLedgerEntries(PaymentTransaction transaction, String description) {
+
+        ChartOfAccounts payoutExpensesAccount = chartOfAccountsRepository.findById("Customer Payout Expenses")
+                .orElseThrow(() -> new RuntimeException("Account not found: Customer Payout Expenses"));
+
+        ChartOfAccounts walletLiabilityAccount = chartOfAccountsRepository.findById("Customer Wallet Liability")
+                .orElseThrow(() -> new RuntimeException("Account not found: Customer Wallet Liability"));
+
+        String ledgerRef = "WALLET-TRANSFER-" + System.currentTimeMillis();
+
+        // Debit Customer Payout Expenses
+        GeneralLedger debitEntry = createLedgerEntry(
+                transaction.getId().toString(),
+                transaction.getTransactionId(),
+                ledgerRef,
+                transaction.getCustomerId(),
+                transaction.getOrderId(),
+                transaction.getAmount(),
+                description,
+                payoutExpensesAccount,
+                GeneralLedger.EntryType.DEBIT
+        );
+
+        // Credit Customer Wallet Liability
+        GeneralLedger creditEntry = createLedgerEntry(
+                transaction.getId().toString(),
+                transaction.getTransactionId(),
+                ledgerRef,
+                transaction.getCustomerId(),
+                transaction.getOrderId(),
+                transaction.getAmount(),
+                description,
+                walletLiabilityAccount,
+                GeneralLedger.EntryType.CREDIT
+        );
+
+        generalLedgerRepository.save(debitEntry);
+        generalLedgerRepository.save(creditEntry);
+
+        log.info("Created WALLET TRANSFER ledger entries for transaction: {}", transaction.getTransactionId());
+    }
+
+    /**
+     * Create WALLET PAYOUT ledger entries (wallet withdrawal initiated)
+     */
+    @Transactional
+    public PaymentTransaction createWalletPayout(String customerId, String orderId, BigDecimal amount, String description) {
+        String transactionId = "WPOUT" + System.currentTimeMillis() + UUID.randomUUID().toString().substring(0, 8);
+
+        PaymentTransaction transaction = new PaymentTransaction();
+        transaction.setTransactionId(transactionId);
+        transaction.setCustomerId(customerId);
+        transaction.setOrderId(orderId);
+        transaction.setTransactionType(PaymentTransaction.TransactionType.PAYOUT);
+        transaction.setPaymentMethod(PaymentTransaction.PaymentMethod.WALLET);
+        transaction.setAmount(amount);
+        transaction.setCurrency("INR");
+        transaction.setStatus(PaymentTransaction.TransactionStatus.AUTHORIZED);
+        transaction.setIsWalletTransfer(true);
+        transaction.setMetadata(new JSONObject()
+                .put("description", description)
+                .put("type", "WALLET_WITHDRAWAL")
+                .toString());
+
+        PaymentTransaction savedTransaction = paymentTransactionRepository.save(transaction);
+
+        // Create wallet payout GL entries
+        createWalletPayoutInitiatedLedgerEntries(savedTransaction, description);
+
+        return savedTransaction;
+    }
+
+    /**
+     * Create WALLET PAYOUT INITIATED ledger entries
+     */
+    private void createWalletPayoutInitiatedLedgerEntries(PaymentTransaction transaction, String description) {
+
+        ChartOfAccounts walletLiabilityAccount = chartOfAccountsRepository.findById("Customer Wallet Liability")
+                .orElseThrow(() -> new RuntimeException("Account not found: Customer Wallet Liability"));
+
+        ChartOfAccounts payoutClearingAccount = chartOfAccountsRepository.findById("Payout Pending / Clearing")
+                .orElseThrow(() -> new RuntimeException("Account not found: Payout Pending / Clearing"));
+
+        String ledgerRef = "WALLET-PAYOUT-" + System.currentTimeMillis();
+
+        // Debit Customer Wallet Liability
+        GeneralLedger debitEntry = createLedgerEntry(
+                transaction.getId().toString(),
+                transaction.getTransactionId(),
+                ledgerRef,
+                transaction.getCustomerId(),
+                transaction.getOrderId(),
+                transaction.getAmount(),
+                "Wallet withdrawal initiated: " + description,
+                walletLiabilityAccount,
+                GeneralLedger.EntryType.DEBIT
+        );
+
+        // Credit Payout Pending / Clearing
+        GeneralLedger creditEntry = createLedgerEntry(
+                transaction.getId().toString(),
+                transaction.getTransactionId(),
+                ledgerRef,
+                transaction.getCustomerId(),
+                transaction.getOrderId(),
+                transaction.getAmount(),
+                "Pending payout to customer bank: " + description,
+                payoutClearingAccount,
+                GeneralLedger.EntryType.CREDIT
+        );
+
+        generalLedgerRepository.save(debitEntry);
+        generalLedgerRepository.save(creditEntry);
+
+        log.info("Created WALLET PAYOUT INITIATED ledger entries for transaction: {}", transaction.getTransactionId());
+    }
+
+    /**
+     * Calculate wallet balance for a customer
+     */
+    public BigDecimal getWalletBalance(String customerId) {
         try {
-            Payment payment = razorpayClient.payments.fetch(razorpayPaymentId);
+            // Get total credits to wallet (customer wallet liability increases)
+            BigDecimal totalCredits = generalLedgerRepository.sumWalletCredits(customerId,
+                    "Customer Wallet Liability", GeneralLedger.EntryType.CREDIT);
 
-            Map<String, Object> details = new HashMap<>();
-            details.put("id", payment.get("id"));
-            details.put("amount", new BigDecimal(payment.get("amount").toString()).divide(new BigDecimal("100")));
-            details.put("currency", payment.get("currency"));
-            details.put("status", payment.get("status"));
-            details.put("method", payment.get("method"));
-            details.put("order_id", payment.get("order_id"));
-            details.put("created_at", payment.get("created_at"));
+            // Get total debits from wallet (customer wallet liability decreases)
+            BigDecimal totalDebits = generalLedgerRepository.sumWalletDebits(customerId,
+                    "Customer Wallet Liability", GeneralLedger.EntryType.DEBIT);
 
-            if (payment.has("bank")) details.put("bank", payment.get("bank"));
-            if (payment.has("card_id")) details.put("card_id", payment.get("card_id"));
-            if (payment.has("vpa")) details.put("vpa", payment.get("vpa"));
-            if (payment.has("wallet")) details.put("wallet", payment.get("wallet"));
-            if (payment.has("email")) details.put("email", payment.get("email"));
-            if (payment.has("contact")) details.put("contact", payment.get("contact"));
+            if (totalCredits == null) totalCredits = BigDecimal.ZERO;
+            if (totalDebits == null) totalDebits = BigDecimal.ZERO;
 
-            return details;
-
-        } catch (RazorpayException e) {
-            log.error("Error fetching payment details: {}", e.getMessage());
-            throw e;
+            return totalCredits.subtract(totalDebits);
+        } catch (Exception e) {
+            log.error("Error calculating wallet balance for customer: {}", customerId, e);
+            return BigDecimal.ZERO;
         }
     }
 }
