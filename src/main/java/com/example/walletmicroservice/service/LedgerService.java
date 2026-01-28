@@ -72,7 +72,7 @@ public class LedgerService {
     /**
      * SCENARIO 1: Payment Success (Checkout completed)
      * 1001 (Asset) DEBIT = Bank balance increases
-     * 5001 (Clearing) CREDIT = Clear pending amount
+     * 1002 (Clearing) CREDIT = Clear pending amount
      */
     @Transactional
     public void recordPaymentSuccess(
@@ -103,8 +103,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 2: Refund Approved (before processing)
-     * 3001 (Income) DEBIT = Reduce revenue
-     * 5001 (Clearing) CREDIT = Move to pending
+     * 1003 (Income) DEBIT = Reduce revenue
+     * 1004 (Clearing) CREDIT = Move to pending
      */
     @Transactional
     public void recordRefundApproved(
@@ -135,8 +135,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 3: Refund Processed Success
-     * 5001 (Clearing) DEBIT = Clear pending
-     * 1001 (Asset) CREDIT = Bank balance decreases
+     * 1005 (Clearing) DEBIT = Clear pending
+     * 1006 (Asset) CREDIT = Bank balance decreases
      */
     @Transactional
     public void recordRefundProcessedSuccess(
@@ -167,8 +167,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 4: Refund Failed
-     * 5001 (Clearing) DEBIT = Clear pending
-     * 3001 (Income) CREDIT = Increase in revenue
+     * 1007 (Clearing) DEBIT = Clear pending
+     * 1008 (Income) CREDIT = Increase in revenue
      */
     @Transactional
     public void recordRefundFailed(
@@ -199,8 +199,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 5: Wallet Payout (To customer wallet)
-     * 4001 (Expense) DEBIT = Increase expense
-     * 2002 (Liability) CREDIT = Create wallet liability
+     * 1009 (Expense) DEBIT = Increase expense
+     * 1010 (Liability) CREDIT = Create wallet liability
      * for payout we have taking ref id, fund account id, customer id, contact id, amount, user id
      */
     @Transactional
@@ -232,8 +232,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 6: Withdrawal Approved
-     * 2002 (Liability) DEBIT = Reduce wallet liability
-     * 5001 (Clearing) CREDIT = Move to pending
+     * 1011 (Liability) DEBIT = Reduce wallet liability
+     * 1012 (Clearing) CREDIT = Move to pending
      */
     @Transactional
     public void recordWithdrawalApproved(
@@ -264,8 +264,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 7: Withdrawal Processed Success
-     * 5001 (Clearing) DEBIT = Clear pending
-     * 1001 (Asset) CREDIT = Bank balance decreases
+     * 1013 (Clearing) DEBIT = Clear pending
+     * 1014 (Asset) CREDIT = Bank balance decreases
      */
     @Transactional
     public void recordWithdrawalProcessedSuccess(
@@ -296,8 +296,8 @@ public class LedgerService {
 
     /**
      * SCENARIO 8: Withdrawal Failed
-     * 5001 (Clearing) DEBIT = Clear pending
-     * 2002 (Liability) CREDIT = Return to wallet liability
+     * 1015 (Clearing) DEBIT = Clear pending
+     * 1016 (Liability) CREDIT = Return to wallet liability
      */
     @Transactional
     public void recordWithdrawalFailed(
