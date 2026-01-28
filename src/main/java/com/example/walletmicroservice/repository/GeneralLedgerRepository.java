@@ -28,8 +28,7 @@ public interface GeneralLedgerRepository extends JpaRepository<GeneralLedger, Lo
     @Query("SELECT COALESCE(SUM(gl.amount), 0) FROM GeneralLedger gl " +
             "WHERE gl.customerId = :customerId " +
             "AND gl.accountName = :accountName " +
-            "AND gl.entryType = :entryType " +
-            "AND gl.isReversed = false")
+            "AND gl.entryType = :entryType ")
     BigDecimal sumWalletCredits(@Param("customerId") String customerId,
                                 @Param("accountName") String accountName,
                                 @Param("entryType") GeneralLedger.EntryType entryType);
@@ -37,8 +36,7 @@ public interface GeneralLedgerRepository extends JpaRepository<GeneralLedger, Lo
     @Query("SELECT COALESCE(SUM(gl.amount), 0) FROM GeneralLedger gl " +
             "WHERE gl.customerId = :customerId " +
             "AND gl.accountName = :accountName " +
-            "AND gl.entryType = :entryType " +
-            "AND gl.isReversed = false")
+            "AND gl.entryType = :entryType ")
     BigDecimal sumWalletDebits(@Param("customerId") String customerId,
                                @Param("accountName") String accountName,
                                @Param("entryType") GeneralLedger.EntryType entryType);

@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/coa/")
+@RequestMapping("/api/v1/coa/")
 @RequiredArgsConstructor
 @Slf4j
 public class ChartAcController {

@@ -44,7 +44,7 @@ public class ChartOfAccounts {
     private LocalDateTime updatedAt;
 
     public enum AccountType {
-        ASSET, LIABILITY, INCOME, EXPENSE, CLEARING
+        ASSET, LIABILITY, INCOME, EXPENSE, CLEARING, Wallet
     }
 
     public enum NormalBalance {
